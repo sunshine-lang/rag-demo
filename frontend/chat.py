@@ -348,16 +348,16 @@ def render_model_config_sidebar():
     )
     st.session_state.model_config["model"] = selected_model
     
-    with st.sidebar.expander("🎛️ 高级参数", expanded=False):
-        temperature = st.sidebar.slider(
-            "Temperature",
-            min_value=0.0,
-            max_value=2.0,
-            value=st.session_state.model_config.get("temperature", 0.7),
-            step=0.1,
-            help="控制输出的随机性，值越高输出越随机"
-        )
-        st.session_state.model_config["temperature"] = temperature
+    st.sidebar.markdown("### 🎛️ 高级参数")
+    temperature = st.sidebar.slider(
+        "Temperature",
+        min_value=0.0,
+        max_value=2.0,
+        value=st.session_state.model_config.get("temperature", 0.7),
+        step=0.1,
+        help="控制输出的随机性，值越高输出越随机"
+    )
+    st.session_state.model_config["temperature"] = temperature
     
     col1, col2, col3 = st.sidebar.columns(3)
     with col1:

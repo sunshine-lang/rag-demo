@@ -15,6 +15,7 @@ from tavily import TavilyClient
 from pymilvus import MilvusClient, Collection, connections, utility, FieldSchema, CollectionSchema, DataType
 import PyPDF2
 from docx import Document
+from openpyxl import load_workbook
 import re
 from rank_bm25 import BM25Okapi
 import jieba
@@ -41,7 +42,7 @@ embeddings = AzureOpenAIEmbeddings(
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    deployment_name=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME"),
+    model=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME"),
 )
 
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
@@ -78,6 +79,7 @@ class DocumentInfo(BaseModel):
     file_size: int
     file_type: str
     status: str
+    chunks_count: int = 0
 
 BM25_INDEX_FILE = os.path.join(os.path.dirname(__file__), "bm25_index.json")
 
@@ -208,6 +210,23 @@ def extract_text_from_docx(file_content: bytes) -> str:
 def extract_text_from_txt(file_content: bytes) -> str:
     return file_content.decode('utf-8', errors='ignore')
 
+def extract_text_from_excel(file_content: bytes) -> str:
+    excel_file = io.BytesIO(file_content)
+    workbook = load_workbook(excel_file, data_only=True)
+    text = ""
+    
+    for sheet_name in workbook.sheetnames:
+        sheet = workbook[sheet_name]
+        text += f"工作表: {sheet_name}\n"
+        
+        for row in sheet.iter_rows(values_only=True):
+            row_text = " | ".join(str(cell) if cell is not None else "" for cell in row)
+            if row_text.strip():
+                text += row_text + "\n"
+    
+    logger.info(f"Excel文本提取完成，长度: {len(text)}")
+    return text
+
 def split_text_into_chunks(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
     sentences = re.split(r'(?<=[。！？\n])', text)
     chunks = []
@@ -236,6 +255,9 @@ def process_document(document_id: str, filename: str, file_content: bytes, file_
         elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
             text = extract_text_from_docx(file_content)
             logger.info(f"DOCX文本提取完成，长度: {len(text)}")
+        elif file_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            text = extract_text_from_excel(file_content)
+            logger.info(f"Excel文本提取完成，长度: {len(text)}")
         elif file_type == "text/plain":
             text = extract_text_from_txt(file_content)
             logger.info(f"TXT文本提取完成，长度: {len(text)}")
@@ -451,6 +473,32 @@ def needs_search(query: str) -> bool:
     except:
         return False
 
+def is_knowledge_relevant(query: str, knowledge_sources: List[Dict[str, Any]]) -> bool:
+    if not knowledge_sources:
+        return False
+    
+    top_content = knowledge_sources[0]["content"]
+    
+    relevance_prompt = f"""请判断以下知识库内容是否真正回答了用户的查询。
+    
+    用户查询：{query}
+    
+    知识库内容（最相关的结果）：
+    {top_content[:500]}
+    
+    请判断：
+    - 如果知识库内容直接回答了用户的问题，回答"是"
+    - 如果知识库内容与用户问题无关或只是部分相关，回答"否"
+    
+    请只回答"是"或"否"，不要其他内容。"""
+    
+    try:
+        response = llm.invoke([HumanMessage(content=relevance_prompt)])
+        return "是" in response.content
+    except Exception as e:
+        logger.warning(f"相关性验证失败: {str(e)}，默认认为相关")
+        return True
+
 def perform_search(query: str) -> str:
     try:
         result = tavily_client.search(
@@ -641,7 +689,7 @@ async def chat(request: ChatRequest):
                 use_query_expansion=request.use_query_expansion
             )
             
-            if knowledge_sources and knowledge_sources[0]["score"] > 0.3:
+            if knowledge_sources and knowledge_sources[0]["score"] > 0.3 and is_knowledge_relevant(last_user_message, knowledge_sources):
                 used_knowledge = True
                 logger.info(f"使用知识库内容，最高分数: {knowledge_sources[0]['score']:.4f}")
                 knowledge_context = "\n\n知识库参考内容：\n"

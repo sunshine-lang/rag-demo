@@ -202,7 +202,7 @@ def load_embedding_config() -> Optional[Dict]:
     except Exception:
         return None
 
-@st.cache_data(ttl=5)
+@st.cache_resource(ttl=60)
 def get_documents():
     try:
         response = requests.get(f"{API_URL}/documents", timeout=10)
@@ -264,7 +264,28 @@ def render_embedding_config_sidebar():
     )
     
     selected_provider = provider_options[provider_display.index(selected_provider_display)]
-    st.session_state.embedding_config["provider"] = selected_provider
+    
+    if st.session_state.embedding_config["provider"] != selected_provider:
+        st.session_state.embedding_config["provider"] = selected_provider
+        provider_config = EMBEDDING_MODEL_PROVIDERS[selected_provider]
+        api_key_env_value = os.getenv(provider_config["api_key_env"], "")
+        st.session_state.embedding_config["api_key"] = api_key_env_value
+        if selected_provider == "AzureOpenAI":
+            endpoint_env_value = os.getenv(provider_config["endpoint_env"], "")
+            api_version_env_value = os.getenv(provider_config["api_version_env"], "")
+            deployment_env_value = os.getenv(provider_config["deployment_env"], "")
+            st.session_state.embedding_config["endpoint"] = endpoint_env_value
+            st.session_state.embedding_config["api_version"] = api_version_env_value or provider_config["default_api_version"]
+            st.session_state.embedding_config["deployment"] = deployment_env_value
+            st.session_state.embedding_config["base_url"] = ""
+        else:
+            base_url_env_value = os.getenv(provider_config.get("base_url_env", ""), "")
+            st.session_state.embedding_config["base_url"] = base_url_env_value or provider_config.get("default_base_url", "")
+            st.session_state.embedding_config["endpoint"] = ""
+            st.session_state.embedding_config["api_version"] = ""
+            st.session_state.embedding_config["deployment"] = ""
+        st.session_state.embedding_config["model"] = provider_config["models"][0]
+        st.rerun()
     
     provider_config = EMBEDDING_MODEL_PROVIDERS[selected_provider]
     
@@ -429,6 +450,9 @@ st.markdown("""
 
 col1, col2 = st.columns([1, 2])
 
+documents_placeholder = st.empty()
+documents = get_documents()
+
 with col1:
     st.subheader("📁 上传文档")
     
@@ -460,9 +484,9 @@ with col1:
     
     uploaded_files = st.file_uploader(
         "选择文档",
-        type=["pdf", "txt", "docx"],
+        type=["pdf", "txt", "docx", "xlsx"],
         accept_multiple_files=True,
-        help="支持 PDF、TXT、DOCX 格式的文档",
+        help="支持 PDF、TXT、DOCX、XLSX 格式的文档",
         key="file_uploader"
     )
     
@@ -510,48 +534,49 @@ with col1:
     with col_c:
         st.metric("知识块总数", total_chunks)
 
-with col2:
-    st.subheader(f"📄 已上传文档 ({len(documents)})")
-    
-    if documents:
-        for doc in documents:
-            status_emoji = "✅" if doc['status'] == 'completed' else "⏳" if doc['status'] == 'processing' else "❌"
-            status_text = "已处理" if doc['status'] == 'completed' else "处理中" if doc['status'] == 'processing' else "失败"
-            
-            with st.expander(f"{status_emoji} {doc['filename']}", expanded=False):
-                col_a, col_b = st.columns([3, 1])
+with documents_placeholder.container():
+    with col2:
+        st.subheader(f"📄 已上传文档 ({len(documents)})")
+        
+        if documents:
+            for doc in documents:
+                status_emoji = "✅" if doc['status'] == 'completed' else "⏳" if doc['status'] == 'processing' else "❌"
+                status_text = "已处理" if doc['status'] == 'completed' else "处理中" if doc['status'] == 'processing' else "失败"
                 
-                with col_a:
-                    st.write(f"**上传时间:** {format_upload_time(doc['upload_time'])}")
-                    st.write(f"**文件大小:** {format_file_size(doc['file_size'])}")
-                    st.write(f"**文件类型:** {doc['file_type']}")
-                    if doc.get('status') == 'completed':
-                        st.write(f"**知识块数量:** {doc.get('chunks_count', 0)}")
-                    st.write(f"**状态:** {status_text}")
-                
-                with col_b:
-                    if st.button("🗑️ 删除", key=f"delete_{doc['id']}"):
-                        st.session_state[f"confirm_delete_{doc['id']}"] = True
-                
-                if st.session_state.get(f"confirm_delete_{doc['id']}", False):
-                    st.warning(f"⚠️ 确认要删除文档 '{doc['filename']}' 吗？此操作不可恢复。")
-                    col_c, col_d = st.columns([1, 1])
-                    with col_c:
-                        if st.button("✅ 确认删除", key=f"confirm_{doc['id']}", type="primary"):
-                            with st.spinner("正在删除..."):
-                                time.sleep(0.3)
-                                if delete_document(doc['id']):
-                                    st.success("文档删除成功")
-                                    del st.session_state[f"confirm_delete_{doc['id']}"]
-                                    st.rerun()
-                                else:
-                                    st.error("文档删除失败")
-                    with col_d:
-                        if st.button("❌ 取消", key=f"cancel_{doc['id']}"):
-                            del st.session_state[f"confirm_delete_{doc['id']}"]
-                            st.rerun()
-    else:
-        st.info("📭 暂无文档，请上传文档开始使用知识库")
+                with st.expander(f"{status_emoji} {doc['filename']}", expanded=False):
+                    col_a, col_b = st.columns([3, 1])
+                    
+                    with col_a:
+                        st.write(f"**上传时间:** {format_upload_time(doc['upload_time'])}")
+                        st.write(f"**文件大小:** {format_file_size(doc['file_size'])}")
+                        st.write(f"**文件类型:** {doc['file_type']}")
+                        if doc.get('status') == 'completed':
+                            st.write(f"**知识块数量:** {doc.get('chunks_count', 0)}")
+                        st.write(f"**状态:** {status_text}")
+                    
+                    with col_b:
+                        if st.button("🗑️ 删除", key=f"delete_{doc['id']}"):
+                            st.session_state[f"confirm_delete_{doc['id']}"] = True
+                    
+                    if st.session_state.get(f"confirm_delete_{doc['id']}", False):
+                        st.warning(f"⚠️ 确认要删除文档 '{doc['filename']}' 吗？此操作不可恢复。")
+                        col_c, col_d = st.columns([1, 1])
+                        with col_c:
+                            if st.button("✅ 确认删除", key=f"confirm_{doc['id']}", type="primary"):
+                                with st.spinner("正在删除..."):
+                                    time.sleep(0.3)
+                                    if delete_document(doc['id']):
+                                        st.success("文档删除成功")
+                                        del st.session_state[f"confirm_delete_{doc['id']}"]
+                                        st.rerun()
+                                    else:
+                                        st.error("文档删除失败")
+                        with col_d:
+                            if st.button("❌ 取消", key=f"cancel_{doc['id']}"):
+                                del st.session_state[f"confirm_delete_{doc['id']}"]
+                                st.rerun()
+        else:
+            st.info("📭 暂无文档，请上传文档开始使用知识库")
 
 st.sidebar.divider()
 st.sidebar.markdown("### 📖 使用说明")

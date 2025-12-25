@@ -27,3 +27,4 @@ env/
 *.log
 embedding_config.json
 model_config.json
+uploads/
