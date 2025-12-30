@@ -4,6 +4,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from typing import Dict, List, Optional
 import json
+import sseclient
 
 load_dotenv(override=True)
 
@@ -195,6 +196,56 @@ def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=Tr
         return None
     except Exception as e:
         return None
+
+def send_chat_message_stream(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None):
+    try:
+        payload = {
+            "messages": messages,
+            "system_prompt": "你是一个专业的智能助手。请优先基于知识库内容回答用户问题。如果知识库中没有相关信息，请基于联网搜索结果回答。回答时请清晰标注信息来源。",
+            "top_k": top_k,
+            "use_hybrid": use_hybrid,
+            "use_query_expansion": use_query_expansion
+        }
+        
+        if model_config:
+            payload["model_config"] = model_config
+        
+        response = requests.post(
+            f"{API_URL}/chat/stream",
+            json=payload,
+            stream=True,
+            timeout=300
+        )
+        
+        if response.status_code == 200:
+            client = sseclient.SSEClient(response)
+            
+            metadata = None
+            error = None
+            
+            for event in client.events():
+                try:
+                    data = json.loads(event.data)
+                    
+                    if data.get("type") == "metadata":
+                        metadata = data.get("data")
+                    elif data.get("type") == "content":
+                        yield data.get("content", ""), metadata
+                    elif data.get("type") == "error":
+                        error = data.get("error")
+                        break
+                    elif data.get("type") == "done":
+                        break
+                        
+                except json.JSONDecodeError:
+                    continue
+            
+            if error:
+                yield None, {"error": error}
+        else:
+            yield None, {"error": f"HTTP {response.status_code}"}
+    except Exception as e:
+        yield None, {"error": str(e)}
 
 def save_model_config(config: Dict):
     try:
@@ -513,15 +564,26 @@ if prompt := st.chat_input("请输入您的问题..."):
         if not is_valid:
             message_placeholder.markdown(f"❌ 模型配置错误: {validation_msg}\n\n请在侧边栏配置模型后重试。")
         else:
-            response_data = send_chat_message(st.session_state.chat_messages, top_k, use_hybrid, use_query_expansion, model_config)
+            assistant_response = ""
+            metadata = None
+            error = None
             
-            if response_data:
-                assistant_response = response_data["response"]
-                search_results = response_data.get("search_results")
-                knowledge_sources = response_data.get("knowledge_sources")
-                used_knowledge = response_data.get("used_knowledge", False)
-                
-                message_placeholder.markdown(assistant_response)
+            for content, meta in send_chat_message_stream(st.session_state.chat_messages, top_k, use_hybrid, use_query_expansion, model_config):
+                if meta and "error" in meta:
+                    error = meta["error"]
+                    break
+                if meta:
+                    metadata = meta
+                if content:
+                    assistant_response += content
+                    message_placeholder.markdown(assistant_response)
+            
+            if error:
+                message_placeholder.markdown(f"❌ 处理请求时出现错误: {error}")
+            elif assistant_response:
+                search_results = metadata.get("search_results") if metadata else None
+                knowledge_sources = metadata.get("knowledge_sources") if metadata else None
+                used_knowledge = metadata.get("used_knowledge") if metadata else False
                 
                 if used_knowledge:
                     st.info("📚 基于知识库回答")

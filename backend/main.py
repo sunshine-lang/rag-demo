@@ -6,8 +6,8 @@ import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -477,27 +477,11 @@ def is_knowledge_relevant(query: str, knowledge_sources: List[Dict[str, Any]]) -
     if not knowledge_sources:
         return False
     
-    top_content = knowledge_sources[0]["content"]
+    top_score = knowledge_sources[0]["score"]
     
-    relevance_prompt = f"""请判断以下知识库内容是否真正回答了用户的查询。
+    logger.info(f"知识库最高相似度分数: {top_score:.4f}")
     
-    用户查询：{query}
-    
-    知识库内容（最相关的结果）：
-    {top_content[:500]}
-    
-    请判断：
-    - 如果知识库内容直接回答了用户的问题，回答"是"
-    - 如果知识库内容与用户问题无关或只是部分相关，回答"否"
-    
-    请只回答"是"或"否"，不要其他内容。"""
-    
-    try:
-        response = llm.invoke([HumanMessage(content=relevance_prompt)])
-        return "是" in response.content
-    except Exception as e:
-        logger.warning(f"相关性验证失败: {str(e)}，默认认为相关")
-        return True
+    return top_score > 0.5
 
 def perform_search(query: str) -> str:
     try:
@@ -715,6 +699,75 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"聊天处理失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest, http_request: Request):
+    async def generate():
+        try:
+            logger.info(f"收到流式聊天请求，消息数: {len(request.messages)}")
+            messages = [SystemMessage(content=request.system_prompt)]
+            
+            for msg in request.messages:
+                if msg.role == "user":
+                    messages.append(HumanMessage(content=msg.content))
+                elif msg.role == "assistant":
+                    messages.append(AIMessage(content=msg.content))
+            
+            last_user_message = None
+            for msg in reversed(request.messages):
+                if msg.role == "user":
+                    last_user_message = msg.content
+                    break
+            
+            search_results = None
+            knowledge_sources = None
+            used_knowledge = False
+            
+            if last_user_message:
+                logger.info(f"最后用户消息: {last_user_message}")
+                knowledge_sources = search_knowledge_base(
+                    last_user_message, 
+                    top_k=request.top_k,
+                    use_hybrid=request.use_hybrid,
+                    use_query_expansion=request.use_query_expansion
+                )
+                
+                if knowledge_sources and knowledge_sources[0]["score"] > 0.3 and is_knowledge_relevant(last_user_message, knowledge_sources):
+                    used_knowledge = True
+                    logger.info(f"使用知识库内容，最高分数: {knowledge_sources[0]['score']:.4f}")
+                    knowledge_context = "\n\n知识库参考内容：\n"
+                    for i, source in enumerate(knowledge_sources[:min(3, request.top_k)], 1):
+                        knowledge_context += f"{i}. {source['content']}\n"
+                    messages[-1] = HumanMessage(content=last_user_message + knowledge_context)
+                elif needs_search(last_user_message):
+                    logger.info("执行联网搜索")
+                    search_context, search_results = perform_search(last_user_message)
+                    if search_context:
+                        messages[-1] = HumanMessage(content=last_user_message + search_context)
+                else:
+                    logger.info("未使用知识库或联网搜索，直接回答")
+            
+            metadata = {
+                "search_results": search_results,
+                "knowledge_sources": knowledge_sources[:3] if knowledge_sources else None,
+                "used_knowledge": used_knowledge
+            }
+            yield f"data: {json.dumps({'type': 'metadata', 'data': metadata}, ensure_ascii=False)}\n\n"
+            
+            full_response = ""
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    full_response += chunk.content
+                    yield f"data: {json.dumps({'type': 'content', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+            
+            logger.info(f"流式AI响应生成完成，使用知识库: {used_knowledge}")
+            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"流式聊天处理失败: {str(e)}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     import uvicorn
