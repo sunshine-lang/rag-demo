@@ -70,16 +70,6 @@ EMBEDDING_MODEL_PROVIDERS = {
             "text-embedding-async-v2"
         ],
         "requires_base_url": False
-    },
-    "DeepSeek": {
-        "name": "DeepSeek",
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "base_url_env": "DEEPSEEK_BASE_URL",
-        "default_base_url": "https://api.deepseek.com/v1",
-        "models": [
-            "deepseek-embeddings"
-        ],
-        "requires_base_url": False
     }
 }
 

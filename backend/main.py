@@ -6,10 +6,10 @@ import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings, ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from tavily import TavilyClient
 from pymilvus import MilvusClient, Collection, connections, utility, FieldSchema, CollectionSchema, DataType
@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 load_dotenv(override=True)
 
 app = FastAPI(title="Knowledge Base API", version="1.0.0")
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时加载 BM25 索引"""
+    logger.info("正在加载 BM25 索引...")
+    bm25_index.load()
+    logger.info(f"BM25 索引加载完成，文档数: {len(bm25_index.documents)}")
 
 llm = AzureChatOpenAI(
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
@@ -59,12 +66,23 @@ class Message(BaseModel):
     role: str
     content: str
 
+class ModelConfig(BaseModel):
+    """动态模型配置"""
+    provider: str = "AzureOpenAI"
+    model: str = ""
+    api_key: str = ""
+    base_url: Optional[str] = None
+    endpoint: Optional[str] = None
+    api_version: Optional[str] = None
+    temperature: float = 0.7
+
 class ChatRequest(BaseModel):
     messages: List[Message]
     system_prompt: str = "You are a helpful assistant."
     top_k: int = 5
     use_hybrid: bool = True
     use_query_expansion: bool = True
+    llm_config: Optional[Dict[str, Any]] = None  # 动态模型配置
 
 class ChatResponse(BaseModel):
     response: str
@@ -80,6 +98,7 @@ class DocumentInfo(BaseModel):
     file_type: str
     status: str
     chunks_count: int = 0
+    error: Optional[str] = None  # 新增错误信息字段
 
 BM25_INDEX_FILE = os.path.join(os.path.dirname(__file__), "bm25_index.json")
 
@@ -284,12 +303,15 @@ def process_document(document_id: str, filename: str, file_content: bytes, file_
         collection = get_milvus_collection()
         logger.info(f"Milvus集合获取成功")
         
-        logger.info(f"步骤4: 生成嵌入向量并插入数据...")
+        logger.info(f"步骤4: 批量生成嵌入向量...")
+        
+        # 批量生成所有嵌入向量（一次 API 调用，大幅提升性能）
+        all_embeddings = embeddings.embed_documents(chunks)
+        logger.info(f"嵌入向量批量生成完成，共 {len(all_embeddings)} 个")
+        
         data = []
-        for i, chunk in enumerate(chunks):
+        for i, (chunk, embedding) in enumerate(zip(chunks, all_embeddings)):
             chunk_id = f"{document_id}_{i}"
-            logger.info(f"正在处理第 {i+1}/{len(chunks)} 个文本块...")
-            embedding = embeddings.embed_query(chunk)
             metadata = json.dumps({
                 "filename": filename,
                 "chunk_index": i,
@@ -505,6 +527,106 @@ def perform_search(query: str) -> str:
     except Exception as e:
         return "", []
 
+def create_llm(config: Optional[Dict[str, Any]] = None):
+    """模型工厂函数：根据配置动态创建 LLM 实例"""
+    if config is None:
+        # 使用默认的 Azure OpenAI
+        return llm
+    
+    provider = config.get("provider", "AzureOpenAI")
+    
+    if provider == "AzureOpenAI":
+        return AzureChatOpenAI(
+            azure_endpoint=config.get("endpoint") or os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=config.get("api_key") or os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION"),
+            deployment_name=config.get("model") or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+            temperature=config.get("temperature", 0.7),
+        )
+    else:
+        # OpenAI 兼容接口（包括硅基流动、阿里百炼、DeepSeek 等）
+        return ChatOpenAI(
+            api_key=config.get("api_key"),
+            base_url=config.get("base_url"),
+            model=config.get("model"),
+            temperature=config.get("temperature", 0.7),
+        )
+
+def prepare_chat_context(request: ChatRequest) -> tuple:
+    """
+    准备聊天上下文（消息构建、知识库搜索、上下文增强）
+    Returns: (messages, search_results, knowledge_sources, used_knowledge)
+    """
+    messages = [SystemMessage(content=request.system_prompt)]
+    
+    for msg in request.messages:
+        if msg.role == "user":
+            messages.append(HumanMessage(content=msg.content))
+        elif msg.role == "assistant":
+            messages.append(AIMessage(content=msg.content))
+    
+    # 获取最后用户消息
+    last_user_message = next(
+        (msg.content for msg in reversed(request.messages) if msg.role == "user"), 
+        None
+    )
+    
+    search_results = None
+    knowledge_sources = None
+    used_knowledge = False
+    
+    if last_user_message:
+        logger.info(f"最后用户消息: {last_user_message}")
+        knowledge_sources = search_knowledge_base(
+            last_user_message, 
+            top_k=request.top_k,
+            use_hybrid=request.use_hybrid,
+            use_query_expansion=request.use_query_expansion
+        )
+        
+        if knowledge_sources and knowledge_sources[0]["score"] > 0.3 and is_knowledge_relevant(last_user_message, knowledge_sources):
+            used_knowledge = True
+            logger.info(f"使用知识库内容，最高分数: {knowledge_sources[0]['score']:.4f}")
+            knowledge_context = "\n\n知识库参考内容：\n"
+            for i, source in enumerate(knowledge_sources[:min(3, request.top_k)], 1):
+                knowledge_context += f"{i}. {source['content']}\n"
+            messages[-1] = HumanMessage(content=last_user_message + knowledge_context)
+        elif needs_search(last_user_message):
+            logger.info("执行联网搜索")
+            search_context, search_results = perform_search(last_user_message)
+            if search_context:
+                messages[-1] = HumanMessage(content=last_user_message + search_context)
+        else:
+            logger.info("未使用知识库或联网搜索，直接回答")
+    
+    return messages, search_results, knowledge_sources, used_knowledge
+
+def process_document_background(document_id: str, filename: str, file_content: bytes, 
+                                 file_type: str, chunk_size: int, overlap: int):
+    """后台异步处理文档"""
+    try:
+        logger.info(f"后台开始处理文档: {filename} (ID: {document_id})")
+        success, result = process_document(document_id, filename, file_content, file_type, chunk_size, overlap)
+        
+        documents = load_documents()
+        for doc in documents:
+            if doc["id"] == document_id:
+                doc["status"] = "completed" if success else "failed"
+                doc["chunks_count"] = result if success else 0
+                doc["error"] = None if success else str(result)
+                break
+        save_documents(documents)
+        logger.info(f"后台文档处理完成: {filename}, 状态: {'成功' if success else '失败'}")
+    except Exception as e:
+        logger.error(f"后台文档处理失败: {filename}, 错误: {e}")
+        documents = load_documents()
+        for doc in documents:
+            if doc["id"] == document_id:
+                doc["status"] = "failed"
+                doc["error"] = str(e)
+                break
+        save_documents(documents)
+
 @app.get("/")
 async def root():
     return {"message": "Knowledge Base API is running"}
@@ -525,10 +647,15 @@ async def get_documents():
 
 @app.post("/upload")
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     chunk_size: int = Form(500),
     overlap: int = Form(50)
 ):
+    """
+    上传文档（异步处理）
+    文件保存后立即返回，后台异步处理文档
+    """
     logger.info(f"收到文件上传请求: {file.filename}, chunk_size={chunk_size}, overlap={overlap}")
     try:
         file_content = await file.read()
@@ -544,6 +671,7 @@ async def upload_document(
             f.write(file_content)
         logger.info(f"文件保存成功")
         
+        # 保存文档记录（状态为 processing）
         documents = load_documents()
         documents.append({
             "id": document_id,
@@ -551,43 +679,45 @@ async def upload_document(
             "upload_time": upload_time,
             "file_size": file_size,
             "file_type": file.content_type,
-            "status": "processing"
+            "status": "processing",
+            "chunks_count": 0,
+            "error": None
         })
         save_documents(documents)
-        logger.info(f"文档记录已添加到documents.json")
+        logger.info(f"文档记录已添加，开始后台处理...")
         
-        logger.info(f"开始处理文档...")
-        success, result = process_document(document_id, file.filename, file_content, file.content_type, chunk_size, overlap)
-        logger.info(f"文档处理结果: success={success}, result={result}")
+        # 添加后台任务处理文档
+        background_tasks.add_task(
+            process_document_background,
+            document_id, file.filename, file_content, file.content_type, chunk_size, overlap
+        )
         
-        documents = load_documents()
-        for doc in documents:
-            if doc["id"] == document_id:
-                doc["status"] = "completed" if success else "failed"
-                doc["chunks_count"] = result if success else 0
-                break
-        save_documents(documents)
-        logger.info(f"文档状态已更新: {doc['status']}")
-        
-        if success:
-            logger.info(f"文档上传并处理成功: {file.filename}")
-            return {
-                "success": True,
-                "document_id": document_id,
-                "filename": file.filename,
-                "chunks_count": result,
-                "message": "文档上传并处理成功"
-            }
-        else:
-            logger.error(f"文档上传失败: {file.filename}, 错误: {result}")
-            return {
-                "success": False,
-                "document_id": document_id,
-                "error": result
-            }
+        # 立即返回响应
+        return {
+            "success": True,
+            "document_id": document_id,
+            "filename": file.filename,
+            "status": "processing",
+            "message": "文档已上传，正在后台处理中"
+        }
     except Exception as e:
         logger.error(f"文件上传异常: {str(e)}", exc_info=True)
         return {"success": False, "error": str(e)}
+
+@app.get("/documents/{document_id}/status")
+async def get_document_status(document_id: str):
+    """查询文档处理状态"""
+    documents = load_documents()
+    for doc in documents:
+        if doc["id"] == document_id:
+            return {
+                "id": doc["id"],
+                "filename": doc["filename"],
+                "status": doc["status"],
+                "chunks_count": doc.get("chunks_count", 0),
+                "error": doc.get("error")
+            }
+    raise HTTPException(status_code=404, detail="Document not found")
 
 @app.delete("/documents/{document_id}")
 async def delete_document(document_id: str):
@@ -607,8 +737,20 @@ async def delete_document(document_id: str):
         logger.info(f"Milvus数据删除成功")
         
         logger.info(f"步骤4: 从BM25索引删除文档数据...")
-        bm25_index.documents = [doc for doc in bm25_index.documents if doc['document_id'] != document_id]
-        bm25_index.tokenized_corpus = [tokens for doc, tokens in zip(bm25_index.documents, bm25_index.tokenized_corpus) if doc['document_id'] != document_id]
+        # 同时过滤 documents 和 tokenized_corpus，保持索引对齐
+        filtered_pairs = [
+            (doc, tokens) 
+            for doc, tokens in zip(bm25_index.documents, bm25_index.tokenized_corpus) 
+            if doc['document_id'] != document_id
+        ]
+        if filtered_pairs:
+            bm25_index.documents, bm25_index.tokenized_corpus = zip(*filtered_pairs)
+            bm25_index.documents = list(bm25_index.documents)
+            bm25_index.tokenized_corpus = list(bm25_index.tokenized_corpus)
+        else:
+            bm25_index.documents = []
+            bm25_index.tokenized_corpus = []
+        
         if bm25_index.tokenized_corpus:
             bm25_index.bm25 = BM25Okapi(bm25_index.tokenized_corpus)
         else:
@@ -644,52 +786,19 @@ async def delete_document(document_id: str):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    """聊天接口（非流式）"""
     try:
         logger.info(f"收到聊天请求，消息数: {len(request.messages)}")
-        messages = [SystemMessage(content=request.system_prompt)]
         
-        for msg in request.messages:
-            if msg.role == "user":
-                messages.append(HumanMessage(content=msg.content))
-            elif msg.role == "assistant":
-                messages.append(AIMessage(content=msg.content))
+        # 使用公共函数准备上下文
+        messages, search_results, knowledge_sources, used_knowledge = prepare_chat_context(request)
         
-        last_user_message = None
-        for msg in reversed(request.messages):
-            if msg.role == "user":
-                last_user_message = msg.content
-                break
+        # 使用动态模型
+        current_llm = create_llm(request.llm_config)
         
-        search_results = None
-        knowledge_sources = None
-        used_knowledge = False
-        
-        if last_user_message:
-            logger.info(f"最后用户消息: {last_user_message}")
-            knowledge_sources = search_knowledge_base(
-                last_user_message, 
-                top_k=request.top_k,
-                use_hybrid=request.use_hybrid,
-                use_query_expansion=request.use_query_expansion
-            )
-            
-            if knowledge_sources and knowledge_sources[0]["score"] > 0.3 and is_knowledge_relevant(last_user_message, knowledge_sources):
-                used_knowledge = True
-                logger.info(f"使用知识库内容，最高分数: {knowledge_sources[0]['score']:.4f}")
-                knowledge_context = "\n\n知识库参考内容：\n"
-                for i, source in enumerate(knowledge_sources[:min(3, request.top_k)], 1):
-                    knowledge_context += f"{i}. {source['content']}\n"
-                messages[-1] = HumanMessage(content=last_user_message + knowledge_context)
-            elif needs_search(last_user_message):
-                logger.info("执行联网搜索")
-                search_context, search_results = perform_search(last_user_message)
-                if search_context:
-                    messages[-1] = HumanMessage(content=last_user_message + search_context)
-            else:
-                logger.info("未使用知识库或联网搜索，直接回答")
-        
-        response = llm.invoke(messages)
+        response = current_llm.invoke(messages)
         logger.info(f"AI响应生成完成，使用知识库: {used_knowledge}")
+        
         return ChatResponse(
             response=response.content,
             search_results=search_results,
@@ -702,50 +811,16 @@ async def chat(request: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, http_request: Request):
+    """聊天接口（流式）"""
     async def generate():
         try:
             logger.info(f"收到流式聊天请求，消息数: {len(request.messages)}")
-            messages = [SystemMessage(content=request.system_prompt)]
             
-            for msg in request.messages:
-                if msg.role == "user":
-                    messages.append(HumanMessage(content=msg.content))
-                elif msg.role == "assistant":
-                    messages.append(AIMessage(content=msg.content))
+            # 使用公共函数准备上下文
+            messages, search_results, knowledge_sources, used_knowledge = prepare_chat_context(request)
             
-            last_user_message = None
-            for msg in reversed(request.messages):
-                if msg.role == "user":
-                    last_user_message = msg.content
-                    break
-            
-            search_results = None
-            knowledge_sources = None
-            used_knowledge = False
-            
-            if last_user_message:
-                logger.info(f"最后用户消息: {last_user_message}")
-                knowledge_sources = search_knowledge_base(
-                    last_user_message, 
-                    top_k=request.top_k,
-                    use_hybrid=request.use_hybrid,
-                    use_query_expansion=request.use_query_expansion
-                )
-                
-                if knowledge_sources and knowledge_sources[0]["score"] > 0.3 and is_knowledge_relevant(last_user_message, knowledge_sources):
-                    used_knowledge = True
-                    logger.info(f"使用知识库内容，最高分数: {knowledge_sources[0]['score']:.4f}")
-                    knowledge_context = "\n\n知识库参考内容：\n"
-                    for i, source in enumerate(knowledge_sources[:min(3, request.top_k)], 1):
-                        knowledge_context += f"{i}. {source['content']}\n"
-                    messages[-1] = HumanMessage(content=last_user_message + knowledge_context)
-                elif needs_search(last_user_message):
-                    logger.info("执行联网搜索")
-                    search_context, search_results = perform_search(last_user_message)
-                    if search_context:
-                        messages[-1] = HumanMessage(content=last_user_message + search_context)
-                else:
-                    logger.info("未使用知识库或联网搜索，直接回答")
+            # 使用动态模型
+            current_llm = create_llm(request.llm_config)
             
             metadata = {
                 "search_results": search_results,
@@ -755,7 +830,7 @@ async def chat_stream(request: ChatRequest, http_request: Request):
             yield f"data: {json.dumps({'type': 'metadata', 'data': metadata}, ensure_ascii=False)}\n\n"
             
             full_response = ""
-            async for chunk in llm.astream(messages):
+            async for chunk in current_llm.astream(messages):
                 if chunk.content:
                     full_response += chunk.content
                     yield f"data: {json.dumps({'type': 'content', 'content': chunk.content}, ensure_ascii=False)}\n\n"

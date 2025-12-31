@@ -184,7 +184,7 @@ def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=Tr
         }
         
         if model_config:
-            payload["model_config"] = model_config
+            payload["llm_config"] = model_config
         
         response = requests.post(
             f"{API_URL}/chat",
@@ -208,7 +208,7 @@ def send_chat_message_stream(messages, top_k=5, use_hybrid=True, use_query_expan
         }
         
         if model_config:
-            payload["model_config"] = model_config
+            payload["llm_config"] = model_config
         
         response = requests.post(
             f"{API_URL}/chat/stream",
