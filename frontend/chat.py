@@ -8,11 +8,7 @@ import sseclient
 
 load_dotenv(override=True)
 
-st.set_page_config(
-    page_title="AI对话",
-    page_icon="💬",
-    layout="wide"
-)
+# Note: set_page_config is already called in app.py
 
 API_URL = os.getenv("API_URL", "http://localhost:8001")
 CONFIG_FILE = "model_config.json"
@@ -173,7 +169,7 @@ def fetch_available_models(provider: str, api_key: str, base_url: Optional[str] 
     except Exception as e:
         return False, [], f"获取模型列表时出错: {str(e)}"
 
-def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None):
+def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None, embedding_config=None):
     try:
         payload = {
             "messages": messages,
@@ -182,9 +178,11 @@ def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=Tr
             "use_hybrid": use_hybrid,
             "use_query_expansion": use_query_expansion
         }
-        
+
         if model_config:
             payload["llm_config"] = model_config
+        if embedding_config:
+            payload["embedding_config"] = embedding_config
         
         response = requests.post(
             f"{API_URL}/chat",
@@ -197,7 +195,7 @@ def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=Tr
     except Exception as e:
         return None
 
-def send_chat_message_stream(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None):
+def send_chat_message_stream(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None, embedding_config=None):
     try:
         payload = {
             "messages": messages,
@@ -206,9 +204,11 @@ def send_chat_message_stream(messages, top_k=5, use_hybrid=True, use_query_expan
             "use_hybrid": use_hybrid,
             "use_query_expansion": use_query_expansion
         }
-        
+
         if model_config:
             payload["llm_config"] = model_config
+        if embedding_config:
+            payload["embedding_config"] = embedding_config
         
         response = requests.post(
             f"{API_URL}/chat/stream",
@@ -568,7 +568,8 @@ if prompt := st.chat_input("请输入您的问题..."):
             metadata = None
             error = None
             
-            for content, meta in send_chat_message_stream(st.session_state.chat_messages, top_k, use_hybrid, use_query_expansion, model_config):
+            embedding_config = st.session_state.get("embedding_config")
+            for content, meta in send_chat_message_stream(st.session_state.chat_messages, top_k, use_hybrid, use_query_expansion, model_config, embedding_config):
                 if meta and "error" in meta:
                     error = meta["error"]
                     break

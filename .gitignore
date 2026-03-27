@@ -25,6 +25,9 @@ env/
 .venv
 .DS_Store
 *.log
-embedding_config.json
-model_config.json
+frontend/embedding_config.json
+frontend/model_config.json
+**/*config*.json
+!*.example.json
+!*.example
 uploads/

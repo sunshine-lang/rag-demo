@@ -9,11 +9,7 @@ import json
 
 load_dotenv(override=True)
 
-st.set_page_config(
-    page_title="知识库管理",
-    page_icon="📚",
-    layout="wide"
-)
+# Note: set_page_config is already called in app.py
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 EMBEDDING_CONFIG_FILE = "embedding_config.json"
@@ -24,11 +20,11 @@ EMBEDDING_MODEL_PROVIDERS = {
         "api_key_env": "OPENAI_API_KEY",
         "base_url_env": "OPENAI_BASE_URL",
         "default_base_url": "https://api.openai.com/v1",
-        "models": [
-            "text-embedding-3-small",
-            "text-embedding-3-large",
-            "text-embedding-ada-002"
-        ],
+        "models": {
+            "text-embedding-3-small": 1536,
+            "text-embedding-3-large": 3072,
+            "text-embedding-ada-002": 1536,
+        },
         "requires_base_url": False
     },
     "AzureOpenAI": {
@@ -38,11 +34,11 @@ EMBEDDING_MODEL_PROVIDERS = {
         "deployment_env": "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
         "api_version_env": "AZURE_OPENAI_API_VERSION",
         "default_api_version": "2024-02-15-preview",
-        "models": [
-            "text-embedding-3-small",
-            "text-embedding-3-large",
-            "text-embedding-ada-002"
-        ],
+        "models": {
+            "text-embedding-3-small": 1536,
+            "text-embedding-3-large": 3072,
+            "text-embedding-ada-002": 1536,
+        },
         "requires_endpoint": True
     },
     "硅基流动": {
@@ -50,13 +46,13 @@ EMBEDDING_MODEL_PROVIDERS = {
         "api_key_env": "SILICONFLOW_API_KEY",
         "base_url_env": "SILICONFLOW_BASE_URL",
         "default_base_url": "https://api.siliconflow.cn/v1",
-        "models": [
-            "BAAI/bge-large-zh-v1.5",
-            "BAAI/bge-base-zh-v1.5",
-            "BAAI/bge-small-zh-v1.5",
-            "BAAI/bge-m3",
-            "sentence-transformers/all-MiniLM-L6-v2"
-        ],
+        "models": {
+            "BAAI/bge-large-zh-v1.5": 1024,
+            "BAAI/bge-base-zh-v1.5": 768,
+            "BAAI/bge-small-zh-v1.5": 512,
+            "BAAI/bge-m3": 1024,
+            "sentence-transformers/all-MiniLM-L6-v2": 384,
+        },
         "requires_base_url": False
     },
     "阿里百炼": {
@@ -64,11 +60,11 @@ EMBEDDING_MODEL_PROVIDERS = {
         "api_key_env": "DASHSCOPE_API_KEY",
         "base_url_env": "DASHSCOPE_BASE_URL",
         "default_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "models": [
-            "text-embedding-v3",
-            "text-embedding-v2",
-            "text-embedding-async-v2"
-        ],
+        "models": {
+            "text-embedding-v3": 1024,
+            "text-embedding-v2": 1536,
+            "text-embedding-async-v2": 1536,
+        },
         "requires_base_url": False
     }
 }
@@ -217,7 +213,7 @@ def upload_document(file, chunk_size=500, overlap=50, embedding_config=None):
         files = {"file": (file.name, file, file.type)}
         data = {"chunk_size": chunk_size, "overlap": overlap}
         if embedding_config:
-            data["embedding_config"] = embedding_config
+            data["embedding_config"] = json.dumps(embedding_config, ensure_ascii=False)
         response = requests.post(f"{API_URL}/upload", files=files, data=data, timeout=60)
         if response.status_code == 200:
             get_documents.clear()
@@ -274,7 +270,7 @@ def render_embedding_config_sidebar():
             st.session_state.embedding_config["endpoint"] = ""
             st.session_state.embedding_config["api_version"] = ""
             st.session_state.embedding_config["deployment"] = ""
-        st.session_state.embedding_config["model"] = provider_config["models"][0]
+        st.session_state.embedding_config["model"] = list(provider_config["models"].keys())[0]
         st.rerun()
     
     provider_config = EMBEDDING_MODEL_PROVIDERS[selected_provider]
@@ -323,7 +319,7 @@ def render_embedding_config_sidebar():
         )
         st.session_state.embedding_config["base_url"] = base_url
     
-    available_models = provider_config["models"]
+    available_models = list(provider_config["models"].keys())
     
     # if st.sidebar.button("🔄 刷新模型列表", key="refresh_embedding_models"):
     #     with st.spinner("正在获取嵌入模型列表..."):
