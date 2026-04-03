@@ -1,9 +1,9 @@
+import json
 import os
 import requests
 import streamlit as st
 from dotenv import load_dotenv
 from typing import Dict, List, Optional
-import json
 import sseclient
 
 load_dotenv(override=True)
@@ -169,14 +169,15 @@ def fetch_available_models(provider: str, api_key: str, base_url: Optional[str] 
     except Exception as e:
         return False, [], f"获取模型列表时出错: {str(e)}"
 
-def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None, embedding_config=None):
+def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None, embedding_config=None, web_search_enabled=True):
     try:
         payload = {
             "messages": messages,
             "system_prompt": "你是一个专业的智能助手。请优先基于知识库内容回答用户问题。如果知识库中没有相关信息，请基于联网搜索结果回答。回答时请清晰标注信息来源。",
             "top_k": top_k,
             "use_hybrid": use_hybrid,
-            "use_query_expansion": use_query_expansion
+            "use_query_expansion": use_query_expansion,
+            "web_search_enabled": web_search_enabled
         }
 
         if model_config:
@@ -195,14 +196,15 @@ def send_chat_message(messages, top_k=5, use_hybrid=True, use_query_expansion=Tr
     except Exception as e:
         return None
 
-def send_chat_message_stream(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None, embedding_config=None):
+def send_chat_message_stream(messages, top_k=5, use_hybrid=True, use_query_expansion=True, model_config=None, embedding_config=None, web_search_enabled=True):
     try:
         payload = {
             "messages": messages,
             "system_prompt": "你是一个专业的智能助手。请优先基于知识库内容回答用户问题。如果知识库中没有相关信息，请基于联网搜索结果回答。回答时请清晰标注信息来源。",
             "top_k": top_k,
             "use_hybrid": use_hybrid,
-            "use_query_expansion": use_query_expansion
+            "use_query_expansion": use_query_expansion,
+            "web_search_enabled": web_search_enabled
         }
 
         if model_config:
@@ -263,6 +265,36 @@ def load_model_config() -> Optional[Dict]:
         return None
     except Exception:
         return None
+
+def build_default_model_config(provider: str = "OpenAI") -> Dict:
+    provider_config = MODEL_PROVIDERS[provider]
+    config = {
+        "provider": provider,
+        "model": provider_config["models"][0],
+        "api_key": os.getenv(provider_config["api_key_env"], ""),
+        "base_url": "",
+        "endpoint": "",
+        "api_version": "",
+        "deployment": "",
+        "temperature": 0.7
+    }
+
+    if provider == "AzureOpenAI":
+        config["endpoint"] = os.getenv(provider_config["endpoint_env"], "")
+        config["api_version"] = os.getenv(provider_config["api_version_env"], "") or provider_config["default_api_version"]
+        config["deployment"] = os.getenv(provider_config["deployment_env"], "")
+    else:
+        config["base_url"] = os.getenv(provider_config.get("base_url_env", ""), "") or provider_config.get("default_base_url", "")
+
+    return config
+
+def get_active_model_config() -> Dict:
+    saved_config = load_model_config()
+    if saved_config and saved_config.get("provider") in MODEL_PROVIDERS:
+        base = build_default_model_config(saved_config["provider"])
+        base.update(saved_config)
+        return base
+    return build_default_model_config()
 
 def render_model_config_sidebar():
     st.sidebar.markdown("### 🤖 模型配置")
@@ -470,7 +502,7 @@ st.title("💬 AI智能对话")
 
 st.sidebar.title("⚙️ 设置")
 
-model_config = render_model_config_sidebar()
+model_config = get_active_model_config()
 
 is_config_valid, _ = validate_model_config(
     model_config["provider"],
@@ -481,7 +513,7 @@ is_config_valid, _ = validate_model_config(
 )
 
 if not is_config_valid:
-    st.warning("⚠️ 模型配置不完整，请在侧边栏完成配置后使用")
+    st.warning("⚠️ 模型配置不完整，请到「模型配置」页面完成配置后使用")
 
 st.sidebar.markdown("### 🔍 检索设置")
 top_k = st.sidebar.slider(
@@ -505,6 +537,13 @@ use_query_expansion = st.sidebar.checkbox(
     "启用查询扩展",
     value=True,
     help="自动生成语义相近的查询变体，提高召回率"
+)
+
+st.sidebar.markdown("### 🌐 联网搜索设置")
+web_search_enabled = st.sidebar.checkbox(
+    "启用联网搜索",
+    value=True,
+    help="允许在知识库无法命中时联网检索实时信息"
 )
 
 st.sidebar.divider()
@@ -562,14 +601,14 @@ if prompt := st.chat_input("请输入您的问题..."):
         )
         
         if not is_valid:
-            message_placeholder.markdown(f"❌ 模型配置错误: {validation_msg}\n\n请在侧边栏配置模型后重试。")
+            message_placeholder.markdown(f"❌ 模型配置错误: {validation_msg}\n\n请到「模型配置」页面配置模型后重试。")
         else:
             assistant_response = ""
             metadata = None
             error = None
             
             embedding_config = st.session_state.get("embedding_config")
-            for content, meta in send_chat_message_stream(st.session_state.chat_messages, top_k, use_hybrid, use_query_expansion, model_config, embedding_config):
+            for content, meta in send_chat_message_stream(st.session_state.chat_messages, top_k, use_hybrid, use_query_expansion, model_config, embedding_config, web_search_enabled=web_search_enabled):
                 if meta and "error" in meta:
                     error = meta["error"]
                     break

@@ -1,3 +1,4 @@
+import json
 import os
 import requests
 import streamlit as st
@@ -5,7 +6,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import time
 from typing import Dict, List, Optional
-import json
+
 
 load_dotenv(override=True)
 
@@ -187,6 +188,36 @@ def load_embedding_config() -> Optional[Dict]:
         return None
     except Exception:
         return None
+
+def build_default_embedding_config(provider: str = "OpenAI") -> Dict:
+    provider_config = EMBEDDING_MODEL_PROVIDERS[provider]
+    config = {
+        "provider": provider,
+        "model": list(provider_config["models"].keys())[0],
+        "api_key": os.getenv(provider_config["api_key_env"], ""),
+        "base_url": "",
+        "endpoint": "",
+        "api_version": "",
+        "deployment": "",
+    }
+
+    if provider == "AzureOpenAI":
+        config["endpoint"] = os.getenv(provider_config["endpoint_env"], "")
+        config["api_version"] = os.getenv(provider_config["api_version_env"], "") or provider_config["default_api_version"]
+        config["deployment"] = os.getenv(provider_config["deployment_env"], "")
+    else:
+        config["base_url"] = os.getenv(provider_config.get("base_url_env", ""), "") or provider_config.get("default_base_url", "")
+
+    return config
+
+
+def get_active_embedding_config() -> Dict:
+    saved_config = load_embedding_config()
+    if saved_config and saved_config.get("provider") in EMBEDDING_MODEL_PROVIDERS:
+        base = build_default_embedding_config(saved_config["provider"])
+        base.update(saved_config)
+        return base
+    return build_default_embedding_config()
 
 @st.cache_resource(ttl=60)
 def get_documents():
@@ -415,7 +446,7 @@ st.title("📚 知识库管理")
 
 st.sidebar.title("⚙️ 设置")
 
-embedding_config = render_embedding_config_sidebar()
+embedding_config = get_active_embedding_config()
 
 is_embedding_config_valid, _ = validate_embedding_config(
     embedding_config["provider"],
@@ -426,7 +457,7 @@ is_embedding_config_valid, _ = validate_embedding_config(
 )
 
 if not is_embedding_config_valid:
-    st.warning("⚠️ 嵌入模型配置不完整，请在侧边栏完成配置后上传文档")
+    st.warning("⚠️ 嵌入模型配置不完整，请到「模型配置」页面完成配置后上传文档")
 
 st.markdown("""
 <div style="padding: 10px; background-color: #e8f5e9; border-radius: 5px; margin-bottom: 20px;">

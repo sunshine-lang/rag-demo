@@ -127,6 +127,7 @@ class ChatRequest(BaseModel):
     top_k: int = 5
     use_hybrid: bool = True
     use_query_expansion: bool = True
+    web_search_enabled: bool = True
     llm_config: Optional[Dict[str, Any]] = None  # 动态模型配置
     embedding_config: Optional[Dict[str, Any]] = None  # 动态嵌入配置
 
@@ -679,6 +680,8 @@ def prepare_chat_context(request: ChatRequest) -> tuple:
         route = classify_query(last_user_message, llm_instance=current_llm)
         logger.info(f"查询分类结果: {route}")
 
+        allow_web_search = request.web_search_enabled
+
         if route == "kb_search":
             # 知识库检索路径
             knowledge_sources = search_knowledge_base(
@@ -701,7 +704,10 @@ def prepare_chat_context(request: ChatRequest) -> tuple:
             else:
                 # 知识库检索失败，降级到联网搜索
                 logger.info("知识库检索未命中相关内容，降级到联网搜索")
-                search_context, search_results = perform_search(last_user_message)
+                if not allow_web_search:
+                    search_context, search_results = "", None
+                else:
+                    search_context, search_results = perform_search(last_user_message)
                 if search_context:
                     messages[-1] = HumanMessage(content=last_user_message + search_context)
                 else:
@@ -710,7 +716,10 @@ def prepare_chat_context(request: ChatRequest) -> tuple:
         elif route == "web_search":
             # 联网搜索路径
             logger.info("执行联网搜索")
-            search_context, search_results = perform_search(last_user_message)
+            if not allow_web_search:
+                search_context, search_results = "", None
+            else:
+                search_context, search_results = perform_search(last_user_message)
             if search_context:
                 messages[-1] = HumanMessage(content=last_user_message + search_context)
             else:
