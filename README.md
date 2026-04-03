@@ -7,7 +7,7 @@
 - 🤖 **多模型支持**：支持 OpenAI、Azure OpenAI、硅基流动、阿里百炼、DeepSeek 等多种 LLM
 - 📚 **知识库管理**：支持上传 PDF、DOCX、TXT 文档，自动分块并生成向量索引
 - 🔍 **混合检索**：结合向量检索和 BM25 关键词检索，提高检索准确率
-- 🌐 **联网搜索**：集成 Tavily 搜索，获取最新实时信息
+- 🌐 **联网搜索**：集成 Tavily 搜索，获取最新实时信息，支持对话页开关控制
 - 🎯 **查询扩展**：自动生成查询变体，提高召回率
 - 🎨 **Streamlit 界面**：简洁美观的 Web 界面，支持对话和知识库管理
 - 🐳 **Docker 部署**：使用 Docker Compose 快速部署 Milvus 向量数据库
@@ -24,14 +24,17 @@ ademo/
 ├── frontend/
 │   ├── app.py                  # Streamlit 主应用
 │   ├── chat.py                 # AI 对话页面
-│   ├── knowledge_management.py # 知识库管理页面
-│   ├── model_config.json       # 模型配置
-│   └── embedding_config.json   # 嵌入模型配置
+  │   ├── knowledge_management.py # 知识库管理页面
+  │   ├── model_config_page.py    # 模型配置页面（LLM/向量）
+  │   ├── model_config_utils.py   # LLM 配置工具
+  │   ├── embedding_config_utils.py # 向量配置工具
+  │   ├── model_config.json       # 模型配置
+  │   └── embedding_config.json   # 嵌入模型配置
 ├── .env                        # 环境变量（不提交）
 ├── .env.example                # 环境变量模板
 ├── .gitignore                  # Git 忽略文件
 ├── requirements.txt            # Python 依赖
-├── docker-compose.yml          # Docker Compose 配置
+  ├── milvus.yml                  # Docker Compose 配置
 └── README.md                   # 项目说明
 ```
 
@@ -100,7 +103,7 @@ API_URL=http://localhost:8000
 ### 4. 启动 Milvus 向量数据库
 
 ```bash
-docker-compose up -d
+docker-compose -f milvus.yml up -d
 ```
 
 等待 Milvus 启动完成（约 1-2 分钟）。
@@ -128,15 +131,15 @@ streamlit run app.py
 ### AI 对话
 
 1. 在左侧选择 "💬 AI对话" 页面
-2. 配置模型提供商和模型名称
+2. 在“🤖 模型配置”页面配置模型提供商和模型名称
 3. 输入问题开始对话
-4. 系统会自动判断是否需要联网搜索
+4. 可在对话页开启或关闭“联网搜索”
 5. 如果知识库中有相关内容，会自动引用
 
 ### 知识库管理
 
 1. 在左侧选择 "📚 知识库管理" 页面
-2. 配置嵌入模型提供商和模型名称
+2. 在“🤖 模型配置”页面配置向量/嵌入模型
 3. 点击 "上传文档" 选择文件（支持 PDF、DOCX、TXT）
 4. 设置分块大小和重叠大小
 5. 等待文档处理完成
@@ -163,7 +166,8 @@ streamlit run app.py
   "system_prompt": "You are a helpful assistant.",
   "top_k": 5,
   "use_hybrid": true,
-  "use_query_expansion": true
+  "use_query_expansion": true,
+  "web_search_enabled": true
 }
 ```
 
